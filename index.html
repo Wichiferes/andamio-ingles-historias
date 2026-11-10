@@ -391,6 +391,24 @@ async function idbClearAudios(){
     return true;
   }catch(e){return false}
 }
+async function idbListAudios(){
+  try{
+    const db=await dbOpen();
+    return await new Promise((res,rej)=>{
+      const q=db.transaction('audios').objectStore('audios').openCursor();
+      const out=[];
+      q.onsuccess=()=>{const c=q.result;if(!c)return res(out);out.push({key:String(c.key),blob:c.value});c.continue()};
+      q.onerror=()=>rej(q.error);
+    });
+  }catch(e){return []}
+}
+async function idbSetAudioKey(key,blob){
+  try{
+    const db=await dbOpen();
+    await new Promise((res,rej)=>{const t=db.transaction('audios','readwrite');t.objectStore('audios').put(blob,key);t.oncomplete=res;t.onerror=()=>rej(t.error)});
+    return true;
+  }catch(e){return false}
+}
 async function countCachedAudios(){
   try{
     const db=await dbOpen();
@@ -842,9 +860,41 @@ async function copy(text){
   catch(e){const t=document.createElement('textarea');t.value=text;t.style.cssText='position:fixed;opacity:0';document.body.appendChild(t);t.select();let ok=false;try{ok=document.execCommand('copy')}catch(_){}t.remove();return ok}
 }
 function dl(name,text,type){
-  const b=new Blob([text],{type:type||'application/json'});const u=URL.createObjectURL(b);
-  const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();
-  setTimeout(()=>URL.revokeObjectURL(u),4000);
+  const b=new Blob([text],{type:type||'application/json'});dlBlob(name,b);
+}
+function dlBlob(name,blob){
+  const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(u),8000);
+}
+/* ZIP local sin compresión: funciona sin librerías externas y conserva los audios binarios. */
+const ZIP_U8=v=>new Uint8Array(v), zipText=t=>new TextEncoder().encode(t);
+function zipCrc32(bytes){let c=0xffffffff;for(const b of bytes){c^=b;for(let k=0;k<8;k++)c=(c>>>1)^((c&1)?0xedb88320:0)}return (c^0xffffffff)>>>0}
+function z16(n){return new Uint8Array([n&255,(n>>>8)&255])}
+function z32(n){return new Uint8Array([n&255,(n>>>8)&255,(n>>>16)&255,(n>>>24)&255])}
+function zcat(parts){const n=parts.reduce((a,x)=>a+x.length,0),o=new Uint8Array(n);let p=0;for(const x of parts){o.set(x,p);p+=x.length}return o}
+function zipStore(files){
+  const locals=[],central=[];let off=0;
+  for(const f of files){const name=zipText(f.name),data=ZIP_U8(f.data),crc=zipCrc32(data);const h=zcat([z32(0x04034b50),z16(20),z16(0),z16(0),z16(0),z16(0),z32(crc),z32(data.length),z32(data.length),z16(name.length),z16(0),name]);locals.push(zcat([h,data]));const ch=zcat([z32(0x02014b50),z16(20),z16(20),z16(0),z16(0),z16(0),z16(0),z32(crc),z32(data.length),z32(data.length),z16(name.length),z16(0),z16(0),z16(0),z16(0),z32(0),z32(off),name]);central.push(ch);off+=h.length+data.length}
+  const body=zcat([...locals,...central]),cdSize=central.reduce((a,x)=>a+x.length,0),cdOff=body.length-cdSize,n=files.length;
+  return zcat([body,zcat([z32(0x06054b50),z16(0),z16(0),z16(n),z16(n),z32(cdSize),z32(cdOff),z16(0)])]);
+}
+function zipRead(buf){
+  const b=ZIP_U8(buf),dv=new DataView(b.buffer,b.byteOffset,b.byteLength),out={};let p=0;
+  while(p+4<=b.length){const sig=dv.getUint32(p,true);if(sig===0x04034b50){const method=dv.getUint16(p+8,true),cs=dv.getUint32(p+18,true),nl=dv.getUint16(p+26,true),el=dv.getUint16(p+28,true);if(method!==0)throw new Error('Este ZIP usa compresión no compatible');const ns=p+30,ds=ns+nl+el;out[new TextDecoder().decode(b.slice(ns,ns+nl))]=b.slice(ds,ds+cs);p=ds+cs}else if(sig===0x02014b50||sig===0x06054b50)break;else p++}if(!Object.keys(out).length)throw new Error('ZIP vacío o no compatible');return out;
+}
+async function exportZip(sid){
+  const audios=await idbListAudios(), files=[{name:'andamio-manifest.json',data:zipText(JSON.stringify({format:'andamio-zip',version:1,exportedAt:new Date().toISOString(),stateFile:'state.json',audioCount:audios.length},null,2))},{name:'state.json',data:zipText(JSON.stringify(exportState(true),null,2))}];
+  for(let i=0;i<audios.length;i++){const ext=(audios[i].blob.type||'').includes('webm')?'webm':'wav';files.push({name:'audios/'+String(i+1).padStart(4,'0')+'.'+ext,data:new Uint8Array(await audios[i].blob.arrayBuffer())});}
+  const audioMap=audios.map((x,i)=>({file:'audios/'+String(i+1).padStart(4,'0')+'.'+((x.blob.type||'').includes('webm')?'webm':'wav'),key:x.key}));
+  files[0].data=zipText(JSON.stringify({format:'andamio-zip',version:1,exportedAt:new Date().toISOString(),stateFile:'state.json',audioCount:audios.length,audios:audioMap,storyId:sid||null},null,2));
+  return new Blob([zipStore(files)],{type:'application/zip'});
+}
+async function importZip(buf){
+  const z=zipRead(buf),mf=z['andamio-manifest.json']&&JSON.parse(new TextDecoder().decode(z['andamio-manifest.json']));
+  if(!mf||mf.format!=='andamio-zip'||!z[mf.stateFile||'state.json'])throw new Error('No es un respaldo ZIP de Andamio válido.');
+  const o=JSON.parse(new TextDecoder().decode(z[mf.stateFile||'state.json']));if(!validState(o))throw new Error('El ZIP no contiene un estado válido.');
+  mergeState(o);let restored=0;for(const a of (mf.audios||[])){const data=z[a.file];if(data&&await idbSetAudioKey(a.key,new Blob([data],{type:a.file.endsWith('.webm')?'audio/webm':'audio/wav'})))restored++}
+  await countCachedAudios();save();return restored;
 }
 function selfHtml(){
   const seed=JSON.stringify(exportState(true)).replace(/</g,'\\u003c');
@@ -1405,15 +1455,15 @@ function importText(text){
   state.last=added[0].id;save();
   return {added};
 }
-R.imp=()=>'<h2>1. Importar JSON (Historia o Respaldo)</h2><p class="muted">Pega el JSON de Claude o una copia JSON exportada previamente.</p>'+
+R.imp=()=>'<h2>1. Importar JSON o ZIP</h2><p class="muted">Pega JSON de Claude, restaura un JSON o importa un ZIP con historias, progreso y audios IA.</p>'+
   '<textarea id="impTa" class="ta" data-in="imp" placeholder=\'{"story_title": "…", "blocks": [ … ]}\'>'+esc(ui.draft||'')+'</textarea>'+
-  '<div class="row"><button class="btn pri" data-a="doImport">Guardar JSON</button><button class="btn" data-a="pasteClip">'+ic('copy')+'Pegar</button><label class="btn">'+ic('up')+'Elegir archivo .json<input type="file" id="impFile" accept=".json,.txt,application/json,text/plain"></label></div>'+
+  '<div class="row"><button class="btn pri" data-a="doImport">Guardar JSON</button><button class="btn" data-a="pasteClip">'+ic('copy')+'Pegar</button><label class="btn">'+ic('up')+'Elegir JSON o ZIP<input type="file" id="impFile" accept=".json,.zip,.txt,application/json,application/zip,text/plain"></label></div>'+
   '<p id="impMsg" class="msg"></p><p class="muted sm">Desliza o toca «Siguiente» para exportar tus historias o copiar el prompt de Claude.</p>';
 
 R.impExport=()=>{
   const cur=S(curSid());
-  return '<h2>2. Exportar JSON con todo lo generado</h2><p class="muted">Guarda una copia JSON con todas tus historias, traducciones, progreso SRS, imágenes de Pexels y tus llaves configuradas.</p>'+
-    '<div class="row"><button class="btn pri" data-a="bkDown">'+ic('down')+'Exportar Todo (JSON Completo)</button><button class="btn" data-a="bkCopy">'+ic('copy')+'Copiar Todo el JSON</button></div>'+
+  return '<h2>2. Exportar JSON o ZIP</h2><p class="muted">JSON guarda datos y progreso. ZIP guarda además los audios IA de IndexedDB.</p>'+
+    '<div class="row"><button class="btn pri" data-a="bkDown">'+ic('down')+'Exportar JSON</button><button class="btn ai" data-a="bkZip">'+ic('down')+'Exportar ZIP + audios</button><button class="btn" data-a="bkCopy">'+ic('copy')+'Copiar JSON</button></div>'+
     (cur?'<h3>Exportar solo la historia actual</h3><p class="muted sm">«'+esc(cur.title)+'» con su andamiaje, imágenes Pexels encontradas y tus traducciones.</p><div class="row"><button class="btn" data-a="expStoryJson" data-id="'+esc(cur.id)+'">'+ic('down')+'Descargar JSON de «'+esc(cur.title)+'»</button></div>':'')+
     '<h3>Descargar App HTML con todo integrado</h3><div class="row"><button class="btn ai" data-a="selfCopy">'+ic('down')+'Descargar HTML con mis historias y llaves</button></div>';
 };
@@ -1455,16 +1505,18 @@ R.sKeys=()=>{
 R.sSave=()=>{
   const proto=location.protocol;const risky=proto==='file:'||proto==='content:';
   const y=v=>v?'<span class="y">activo</span>':'<span class="n">no disponible</span>';
-  return '<h2>2. Guardado y Exportación JSON</h2><ul class="status"><li><span>Memoria del navegador</span>'+y(health.ls)+'</li><li><span>Base de datos (IndexedDB)</span>'+y(health.idb)+'</li><li><span>Audios IA guardados en caché</span><span class="y">'+health.audioCount+' audios</span></li><li><span>Protegido contra limpieza</span>'+(health.persist===true?'<span class="y">sí</span>':'<span class="muted">no confirmado</span>')+'</li></ul>'+
+  return '<h2>2. Guardado y Exportación JSON / ZIP</h2><ul class="status"><li><span>Memoria del navegador</span>'+y(health.ls)+'</li><li><span>Base de datos (IndexedDB)</span>'+y(health.idb)+'</li><li><span>Audios IA guardados en caché</span><span class="y">'+health.audioCount+' audios</span></li><li><span>Protegido contra limpieza</span>'+(health.persist===true?'<span class="y">sí</span>':'<span class="muted">no confirmado</span>')+'</li></ul>'+
     (!health.ls&&!health.idb?'<div class="callout"><b>Este navegador no está guardando datos.</b> Abre la app en Chrome normal (no incógnito) o usa la copia con tus historias.</div>':'')+
     (risky?'<div class="callout">Abriste el archivo directamente. Algunos navegadores no recuerdan datos así. La opción más segura es «Copia con mis historias».</div>':'')+
     '<div class="row"><button class="btn pri" data-a="selfCopy">'+ic('down')+'Copia con mis historias y llaves (HTML)</button></div>'+
-    '<div class="row"><button class="btn" data-a="bkDown">'+ic('down')+'Exportar JSON Completo</button><button class="btn" data-a="bkCopy">'+ic('copy')+'Copiar JSON</button><label class="btn">'+ic('up')+'Restaurar JSON<input type="file" id="restoreFile" accept=".json,application/json"></label></div>'+
+    '<div class="row"><button class="btn" data-a="bkDown">'+ic('down')+'Exportar JSON</button><button class="btn ai" data-a="bkZip">'+ic('down')+'Exportar ZIP + audios</button><button class="btn" data-a="bkCopy">'+ic('copy')+'Copiar JSON</button><label class="btn">'+ic('up')+'Restaurar JSON o ZIP<input type="file" id="restoreFile" accept=".json,.zip,application/json,application/zip"></label></div>'+
     '<p class="muted sm">El JSON exportado incluye tus historias, vocabulario, imágenes Pexels, progreso y tus llaves guardadas.</p>';
 };
 H.sSave=(sl,el,again)=>{if(again)return;Promise.all([flush(),countCachedAudios()]).then(()=>{if(ui.deck[ui.i]===sl)rerender()})};
 A.selfCopy=()=>{dl('andamio-con-mis-historias.html',selfHtml(),'text/html');toast('Guardado. Abre ese archivo desde ahora')};
 A.bkDown=()=>{dl('andamio-completo-'+dayKey()+'.json',JSON.stringify(exportState(true),null,2));toast('JSON completo descargado')};
+A.bkZip=async()=>{try{toast('Preparando ZIP y audios…');dlBlob('andamio-completo-'+dayKey()+'.zip',await exportZip(curSid()));toast('ZIP con audios IA descargado')}catch(e){toast('No pude crear el ZIP: '+e.message)}};
+A.storyZip=async el=>{try{toast('Preparando ZIP de la historia…');dlBlob((S(el.dataset.id)?.id||'historia')+'-con-audios.zip',await exportZip(el.dataset.id));toast('ZIP de historia descargado')}catch(e){toast('No pude crear el ZIP: '+e.message)}};
 A.bkCopy=async()=>toast(await copy(JSON.stringify(exportState(true),null,2))?'JSON completo copiado':'No pude copiar');
 
 R.sVoice=()=>{
@@ -1547,11 +1599,8 @@ document.addEventListener('change',e=>{
   else if(k==='gvoice'){state.settings.geminiVoice=t.value;save();toast('Voz IA: '+t.value)}
   else if(k==='auto'){state.settings.autoSpeak=t.checked;save()}
   else if(k==='usegem'){state.settings.useGeminiTTS=t.checked;save()}
-  else if(t.id==='impFile')readFile(t.files[0],txt=>{ui.draft=txt;doImport(txt)});
-  else if(t.id==='restoreFile')readFile(t.files[0],txt=>{
-    try{const o=parseJsonText(txt);if(!validState(o))throw new Error('Ese archivo no es un respaldo de Andamio.');mergeState(o);toast('Respaldo restaurado');openLibrary()}
-    catch(err){toast(err.message)}
-  });
+  else if(t.id==='impFile'){const f=t.files[0];if(f&&/\.zip$/i.test(f.name))f.arrayBuffer().then(importZip).then(n=>{toast('ZIP restaurado ('+n+' audios)');openLibrary()}).catch(err=>toast(err.message));else readFile(f,txt=>{ui.draft=txt;doImport(txt)})}
+  else if(t.id==='restoreFile'){const f=t.files[0];if(f&&/\.zip$/i.test(f.name))f.arrayBuffer().then(importZip).then(n=>{toast('ZIP restaurado ('+n+' audios)');openLibrary()}).catch(err=>toast(err.message));else readFile(f,txt=>{try{const o=parseJsonText(txt);if(!validState(o))throw new Error('Ese archivo no es un respaldo de Andamio.');mergeState(o);toast('Respaldo restaurado');openLibrary()}catch(err){toast(err.message)}})};
 });
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')flush()});
 window.addEventListener('pagehide',()=>{flush()});
