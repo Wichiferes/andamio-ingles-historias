@@ -304,7 +304,8 @@ const DEF=()=>({
     geminiVoice:'Kore',
     geminiModel:'gemini-2.5-flash-preview-tts',
     useGeminiTTS:true,
-    geminiEvalModel:'gemini-3.8-flash'
+    ttsFallbackUrl:'',ttsFallbackKey:'',pronunciationProvider:'gemini',azureSpeechKey:'',azureSpeechRegion:'',
+    geminiEvalModel:'gemini-3.6-flash'
   }
 });
 let state=DEF();
@@ -703,34 +704,22 @@ async function fetchGeminiAudioBlob(text){
   throw lastErr||new Error('Fallo Gemini TTS');
 }
 
+async function fetchFallbackAudioBlob(text){
+  const url=String(state.settings.ttsFallbackUrl||'').trim();if(!url)throw new Error('No hay endpoint TTS de respaldo configurado');
+  const headers={'Content-Type':'application/json'},key=String(state.settings.ttsFallbackKey||'').trim();if(key)headers.Authorization='Bearer '+key;
+  const r=await fetch(url,{method:'POST',headers,body:JSON.stringify({model:'tts-1',input:String(text),voice:'en-US-AvaNeural',response_format:'mp3',speed:state.settings.rate||1})});
+  if(!r.ok)throw new Error('Endpoint TTS HTTP '+r.status);const blob=await r.blob();if(!blob.size)throw new Error('Audio TTS vacío');return {blob,fallback:true};
+}
+async function playAudioBlob(res,rate,btnEl,mySeq){
+  if(mySeq!==speakSeq)return;const u=URL.createObjectURL(res.blob),au=new Audio(u);activeAudio=au;au.playbackRate=rate?Math.max(.55,Math.min(1.25,rate)):(state.settings.rate||1);
+  au.onended=()=>{URL.revokeObjectURL(u);if(activeAudio===au)activeAudio=null;if(btnEl)btnEl.classList.remove('busy')};
+  au.onerror=()=>{URL.revokeObjectURL(u);if(activeAudio===au)activeAudio=null;if(btnEl)btnEl.classList.remove('busy')};await au.play();
+}
 async function speak(text,rate,btnEl){
-  if(!text||!String(text).trim())return;
-  stopAudio();
-  const mySeq=speakSeq;
-  const hasGemini=state.settings.useGeminiTTS&&validGeminiKeys().length>0;
-  if(!hasGemini){
-    speakBrowser(text,rate);
-    return;
-  }
-  if(btnEl)btnEl.classList.add('busy');
-  try{
-    const res=await fetchGeminiAudioBlob(text);
-    if(mySeq!==speakSeq){if(btnEl)btnEl.classList.remove('busy');return}
-    const u=URL.createObjectURL(res.blob);
-    const au=new Audio(u);
-    activeAudio=au;
-    const playRate=rate?Math.max(0.55,Math.min(1.25,rate)):(state.settings.rate||1);
-    au.defaultPlaybackRate=playRate;
-    au.playbackRate=playRate;
-    au.onended=()=>{URL.revokeObjectURL(u);if(activeAudio===au)activeAudio=null;if(btnEl)btnEl.classList.remove('busy')};
-    au.onerror=()=>{URL.revokeObjectURL(u);if(activeAudio===au)activeAudio=null;if(btnEl)btnEl.classList.remove('busy');speakBrowser(text,rate)};
-    await au.play();
-  }catch(e){
-    if(btnEl)btnEl.classList.remove('busy');
-    if(mySeq!==speakSeq)return;
-    toast('Voz IA no disponible ('+(e.message||'error')+'). Usando voz del navegador.');
-    speakBrowser(text,rate);
-  }
+  if(!text||!String(text).trim())return;stopAudio();const mySeq=speakSeq;if(btnEl)btnEl.classList.add('busy');
+  if(state.settings.useGeminiTTS&&validGeminiKeys().length){try{await playAudioBlob(await fetchGeminiAudioBlob(text),rate,btnEl,mySeq);return}catch(e){}}
+  try{await playAudioBlob(await fetchFallbackAudioBlob(text),rate,btnEl,mySeq);toast('Usando Edge-TTS de respaldo');return}catch(e){}
+  if(btnEl)btnEl.classList.remove('busy');if(mySeq===speakSeq){toast('Usando voz del navegador');speakBrowser(text,rate)}
 }
 
 /* Generador por lotes: genera todos los audios de una historia (frases, definiciones, ideas, historias, resúmenes y vocabulario) */
@@ -1350,15 +1339,16 @@ async function prNormalizeAudio(blob){
 }
 async function prToB64(blob){const a=new Uint8Array(await blob.arrayBuffer());let bin='';for(let i=0;i<a.length;i+=0x8000)bin+=String.fromCharCode(...a.subarray(i,i+0x8000));return btoa(bin)}
 function prJson(text){let t=String(text||'').trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');const a=t.indexOf('{'),z=t.lastIndexOf('}');if(a<0||z<a)throw new Error('Gemini no devolvió JSON válido');return JSON.parse(t.slice(a,z+1))}
-async function evaluatePronunciation(items){
-  const keys=validGeminiKeys(); if(!keys.length)throw new Error('NO_KEYS');
-  const parts=[{text:'Evalúa la pronunciación de una ronda de inglés. Devuelve EXCLUSIVAMENTE JSON válido. Para cada audio, compara con el texto esperado. No inventes detalles que no puedas oír. Usa esta estructura: {"overall":0,"summary":"","items":[{"index":1,"score":0,"heard":"","issues":"","feedback":"","retry":true}]} Puntuación de 0 a 100. Responde en español, pero conserva las palabras inglesas problemáticas.\n\nElementos:'}];
-  items.forEach((x,i)=>parts.push({text:'\nAUDIO '+(i+1)+' | Texto esperado: '+x.en}));
-  for(const x of items){parts.push({text:'\nArchivo de audio correspondiente a: '+x.en});parts.push({inlineData:{mimeType:'audio/wav',data:x.b64}})}
-  const model=state.settings.geminiEvalModel||'gemini-3.8-flash'; let last=null;
-  for(let i=0;i<keys.length;i++){const cur=keys[i];try{const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(cur.key),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts}],generationConfig:{temperature:0.2,responseMimeType:'application/json'}})});if(!r.ok){const raw=await r.text().catch(()=>''),detail=(()=>{try{const j=JSON.parse(raw);return j.error&&j.error.message||raw}catch(e){return raw}})();last=new Error('Gemini HTTP '+r.status+(detail?': '+detail.slice(0,280):''));continue}const j=await r.json();const text=((((j.candidates||[])[0]||{}).content||{}).parts||[]).map(p=>p.text||'').join('');const result=prJson(text);result.items=Array.isArray(result.items)?result.items:[];return result}catch(e){last=e}}
-  throw last||new Error('No se pudo evaluar la ronda');
+async function evaluateAzurePronunciation(items){
+  const key=String(state.settings.azureSpeechKey||'').trim(),region=String(state.settings.azureSpeechRegion||'').trim();if(!key||!region)throw new Error('AZURE_NOT_CONFIGURED');const out=[];
+  for(const x of items){const cfg=btoa(unescape(encodeURIComponent(JSON.stringify({ReferenceText:x.en,GradingSystem:'HundredMark',Granularity:'Phoneme',Dimension:'Comprehensive',EnableMiscue:true,EnableProsodyAssessment:true}))));const url='https://'+encodeURIComponent(region)+'.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed';const r=await fetch(url,{method:'POST',headers:{'Ocp-Apim-Subscription-Key':key,'Content-Type':'audio/wav; codecs=audio/pcm; samplerate=16000','Accept':'application/json','Pronunciation-Assessment':cfg},body:b64ToBytes(x.b64)});const raw=await r.text();if(!r.ok)throw new Error('Azure HTTP '+r.status+': '+raw.slice(0,220));const j=JSON.parse(raw),best=(j.NBest||[])[0]||{},pa=best.PronunciationAssessment||{};out.push({index:out.length+1,score:Math.round(Number(pa.PronScore||pa.AccuracyScore||0)),heard:best.Display||j.Display||'',issues:'',feedback:'Precisión '+Math.round(Number(pa.AccuracyScore||0))+'/100 · Fluidez '+Math.round(Number(pa.FluencyScore||0))+'/100'+(pa.ProsodyScore!=null?' · Prosodia '+Math.round(Number(pa.ProsodyScore))+'/100':''),retry:Number(pa.PronScore||0)<70,words:best.Words||[]})}
+  return {overall:Math.round(out.reduce((a,x)=>a+x.score,0)/(out.length||1)),summary:'Evaluación Azure Speech: precisión, fluidez y prosodia.',provider:'azure',items:out};
 }
+async function evaluateGeminiPronunciation(items){
+  const keys=validGeminiKeys();if(!keys.length)throw new Error('NO_KEYS');const parts=[{text:'Evalúa la pronunciación de una ronda de inglés. Devuelve EXCLUSIVAMENTE JSON válido con overall, summary e items. Puntúa de 0 a 100 y responde en español.\n\nElementos:'}];items.forEach((x,i)=>parts.push({text:'\nAUDIO '+(i+1)+' | Texto esperado: '+x.en}));for(const x of items){parts.push({text:'\nArchivo de audio correspondiente a: '+x.en});parts.push({inlineData:{mimeType:'audio/wav',data:x.b64}})}
+  const models=[state.settings.geminiEvalModel||'gemini-3.6-flash','gemini-3.6-flash','gemini-3.8-flash'].filter((x,i,a)=>a.indexOf(x)===i);let last=null;for(const model of models)for(const cur of keys){try{const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(cur.key),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts}],generationConfig:{temperature:.2,responseMimeType:'application/json'}})});if(!r.ok){last=new Error('Gemini HTTP '+r.status+': '+(await r.text()).slice(0,280));continue}const j=await r.json(),text=((((j.candidates||[])[0]||{}).content||{}).parts||[]).map(p=>p.text||'').join(''),result=prJson(text);result.items=Array.isArray(result.items)?result.items:[];result.provider='gemini';return result}catch(e){last=e}}throw last||new Error('No se pudo evaluar la ronda');
+}
+async function evaluatePronunciation(items){if(state.settings.pronunciationProvider==='azure'){try{return await evaluateAzurePronunciation(items)}catch(e){if(e.message!=='AZURE_NOT_CONFIGURED')toast('Azure no disponible; probando Gemini…')}}return evaluateGeminiPronunciation(items)}
 R.prIntro=()=>{
   const count=prItems(ui.scope,'vocab').length+prItems(ui.scope,'phrase').length;return '<h2>Pronunciación</h2><p class="muted">Graba tu voz y recibe feedback de Gemini sobre claridad, ritmo, pausas y sonidos difíciles. El audio se envía solo al terminar la ronda.</p>'+scopeSeg()+'<div class="field"><label for="prKind">Qué quieres practicar</label><select id="prKind" class="ta" data-in="prKind"><option value="vocab">Palabras de vocabulario</option><option value="phrase">Frases de los bloques</option></select></div><div class="field"><label for="prCount">Elementos por ronda</label><select id="prCount" class="ta" data-in="prCount"><option value="3">3</option><option value="5" selected>5</option><option value="8">8</option></select></div><div class="callout">Necesitas permitir el micrófono y tener al menos una llave de Gemini configurada en el botón <b>IA</b>.</div><div class="row"><button class="btn pri" data-a="prStart"'+(count?'':' disabled')+'>Comenzar ronda</button></div>'};
 A.prStart=()=>{const kind=ui.prKind||'vocab';const n=+(ui.prCount||5);const all=prItems(ui.scope,kind);ui.pr={kind,items:shuffle(all).slice(0,n),idx:0,recordings:[],result:null,status:''};setDeck('pron',[{t:'prRound'},{t:'prResult'}],0)};
@@ -1511,7 +1501,8 @@ R.sKeys=()=>{
     '<div class="field"><label>Voz IA de Gemini</label><select class="ta" data-in="gvoice">'+
       voicesList.map(v=>'<option value="'+v+'"'+(state.settings.geminiVoice===v?' selected':'')+'>Voz IA: '+v+'</option>').join('')+
     '</select></div>'+
-    '<div class="field"><label>Llave de Pexels (Fotos en Vocabulario)</label><input class="ta one" type="password" autocomplete="off" data-in="pexels" value="'+esc(state.settings.pexels||'')+'" placeholder="Pega tu llave de Pexels"></div>'+
+    '<div class="field"><label>Llave de Pexels (Fotos en Vocabulario)</label><input class="ta one" type="password" autocomplete="off" data-in="pexels" value="'+esc(state.settings.pexels||'')+'" placeholder="Pega tu llave de Pexels"></div>'+ 
+    '<div class="callout"><b>Respaldo de voz Edge-TTS</b><br><span class="muted sm">Endpoint compatible con /v1/audio/speech; debe permitir CORS.</span><input class="ta one" data-in="ttsurl" value="'+esc(state.settings.ttsFallbackUrl||'')+'" placeholder="https://tu-servidor/v1/audio/speech"><input class="ta one" type="password" data-in="ttskey" value="'+esc(state.settings.ttsFallbackKey||'')+'" placeholder="Token opcional"></div>'+ 
     '<div class="row"><button class="btn pri" data-a="testGeminiVoice">'+ic('vol')+'Probar voz Gemini IA</button></div>';
 };
 
@@ -1535,7 +1526,8 @@ A.bkCopy=async()=>toast(await copy(JSON.stringify(exportState(true),null,2))?'JS
 R.sVoice=()=>{
   const en=voices.filter(v=>/^en/i.test(v.lang));
   return '<h2>3. Opciones de Voz y Velocidad</h2>'+
-    '<div class="field"><label><input type="checkbox" data-in="usegem"'+(state.settings.useGeminiTTS?' checked':'')+'> Usar mis 5 llaves de Gemini Studio IA como voz principal</label></div>'+
+    '<div class="field"><label><input type="checkbox" data-in="usegem"'+(state.settings.useGeminiTTS?' checked':'')+'> Usar mis 5 llaves de Gemini Studio IA como voz principal</label></div>'+ 
+    '<div class="field"><label>Evaluador de pronunciación</label><select class="ta" data-in="pronProvider"><option value="gemini"'+(state.settings.pronunciationProvider!=='azure'?' selected':'')+'>Gemini con respaldo automático 3.6/3.8</option><option value="azure"'+(state.settings.pronunciationProvider==='azure'?' selected':'')+'>Azure Speech Pronunciation Assessment</option></select><input class="ta one" type="password" data-in="azureKey" value="'+esc(state.settings.azureSpeechKey||'')+'" placeholder="Azure Speech key opcional"><input class="ta one" data-in="azureRegion" value="'+esc(state.settings.azureSpeechRegion||'')+'" placeholder="Región Azure, por ejemplo eastus"></div>'+ 
     '<div class="field"><label for="rate">Velocidad de lectura: <b id="rateV">'+(+state.settings.rate).toFixed(2)+'×</b></label><input id="rate" type="range" min="0.5" max="1.2" step="0.05" value="'+state.settings.rate+'" data-in="rate"></div>'+
     '<div class="field"><label><input type="checkbox" data-in="auto"'+(state.settings.autoSpeak?' checked':'')+'> Leer en voz alta automáticamente al abrir una frase o tarjeta</label></div>'+
     (canSpeak?'<div class="field"><label for="vsel">Voz de respaldo del navegador (si estás sin internet)</label><select id="vsel" class="ta" data-in="voice"><option value="">Automática</option>'+en.map(v=>'<option value="'+esc(v.name)+'"'+(v.name===state.settings.voice?' selected':'')+'>'+esc(v.name)+' ('+esc(v.lang)+')</option>').join('')+'</select></div>':'')+
@@ -1602,6 +1594,10 @@ document.addEventListener('input',e=>{
   else if(k==='fs'){state.settings.fs=Math.max(.85,Math.min(1.25,+v||1));applyLook();save();const r=$('#fsV');if(r)r.textContent=Math.round(state.settings.fs*100)+'%'}
   else if(k==='pexels'){state.settings.pexels=v.trim();save()}
   else if(k==='gkey'){const idx=+e.target.dataset.i;state.settings.geminiKeys[idx]=v.trim();save()}
+  else if(k==='ttsurl'){state.settings.ttsFallbackUrl=v.trim();save()}
+  else if(k==='ttskey'){state.settings.ttsFallbackKey=v.trim();save()}
+  else if(k==='azureKey'){state.settings.azureSpeechKey=v.trim();save()}
+  else if(k==='azureRegion'){state.settings.azureSpeechRegion=v.trim();save()}
   else if(k==='prKind'){ui.prKind=v}
   else if(k==='prCount'){ui.prCount=v}
 });
@@ -1612,6 +1608,7 @@ document.addEventListener('change',e=>{
   else if(k==='gvoice'){state.settings.geminiVoice=t.value;save();toast('Voz IA: '+t.value)}
   else if(k==='auto'){state.settings.autoSpeak=t.checked;save()}
   else if(k==='usegem'){state.settings.useGeminiTTS=t.checked;save()}
+  else if(k==='pronProvider'){state.settings.pronunciationProvider=t.value==='azure'?'azure':'gemini';save()}
   else if(t.id==='impFile'){const f=t.files[0];if(f&&/\.zip$/i.test(f.name))f.arrayBuffer().then(importZip).then(n=>{toast('ZIP restaurado ('+n+' audios)');openLibrary()}).catch(err=>toast(err.message));else readFile(f,txt=>{ui.draft=txt;doImport(txt)})}
   else if(t.id==='restoreFile'){const f=t.files[0];if(f&&/\.zip$/i.test(f.name))f.arrayBuffer().then(importZip).then(n=>{toast('ZIP restaurado ('+n+' audios)');openLibrary()}).catch(err=>toast(err.message));else readFile(f,txt=>{try{const o=parseJsonText(txt);if(!validState(o))throw new Error('Ese archivo no es un respaldo de Andamio.');mergeState(o);toast('Respaldo restaurado');openLibrary()}catch(err){toast(err.message)}})};
 });
