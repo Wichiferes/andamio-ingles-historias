@@ -712,7 +712,9 @@ async function fetchGeminiAudioBlob(text){
 }
 
 async function fetchFallbackAudioBlob(text){
-  const url=String(state.settings.ttsFallbackUrl||'').trim();if(!url)throw new Error('No hay endpoint TTS de respaldo configurado');
+  const configured=String(state.settings.ttsFallbackUrl||'').trim();
+  const local=(location.hostname==='localhost'||location.hostname==='127.0.0.1')?'http://localhost:5050/v1/audio/speech':'';
+  const url=configured||local;if(!url)throw new Error('No hay endpoint TTS de respaldo configurado');
   const headers={'Content-Type':'application/json'},key=String(state.settings.ttsFallbackKey||'').trim();if(key)headers.Authorization='Bearer '+key;
   const r=await fetch(url,{method:'POST',headers,body:JSON.stringify({model:'tts-1',input:String(text),voice:'en-US-AvaNeural',response_format:'mp3',speed:state.settings.rate||1})});
   if(!r.ok)throw new Error('Endpoint TTS HTTP '+r.status);const blob=await r.blob();if(!blob.size)throw new Error('Audio TTS vacío');return {blob,fallback:true};
@@ -1509,7 +1511,7 @@ R.sKeys=()=>{
       voicesList.map(v=>'<option value="'+v+'"'+(state.settings.geminiVoice===v?' selected':'')+'>Voz IA: '+v+'</option>').join('')+
     '</select></div>'+
     '<div class="field"><label>Llave de Pexels (Fotos en Vocabulario)</label><input class="ta one" type="password" autocomplete="off" data-in="pexels" value="'+esc(state.settings.pexels||'')+'" placeholder="Pega tu llave de Pexels"></div>'+ 
-    '<div class="callout"><b>Respaldo de voz Edge-TTS</b><br><span class="muted sm">Endpoint compatible con /v1/audio/speech; debe permitir CORS.</span><input class="ta one" data-in="ttsurl" value="'+esc(state.settings.ttsFallbackUrl||'')+'" placeholder="https://tu-servidor/v1/audio/speech"><input class="ta one" type="password" data-in="ttskey" value="'+esc(state.settings.ttsFallbackKey||'')+'" placeholder="Token opcional"></div>'+ 
+    '<div class="callout"><b>Respaldo de voz Edge-TTS</b><br><span class="muted sm">Después de fallar Gemini, usa este endpoint compatible con /v1/audio/speech. En localhost se prueba automáticamente http://localhost:5050/v1/audio/speech; desde GitHub Pages usa una URL HTTPS con CORS.</span><input class="ta one" data-in="ttsurl" value="'+esc(state.settings.ttsFallbackUrl||'')+'" placeholder="https://tu-servidor/v1/audio/speech"><input class="ta one" type="password" data-in="ttskey" value="'+esc(state.settings.ttsFallbackKey||'')+'" placeholder="Token opcional"></div>'+ 
     '<div class="row"><button class="btn pri" data-a="testGeminiVoice">'+ic('vol')+'Probar voz Gemini IA</button></div>';
 };
 
