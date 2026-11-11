@@ -508,6 +508,9 @@ function storyToRawJson(s){
 }
 function mergeState(b){
   b=normState(b);
+  const previous=Array.isArray(state.stories)?state.stories.slice():[];
+  state.stories=[];
+  previous.forEach(s=>state.stories.push(s));
   b.stories.forEach(s=>{const i=state.stories.findIndex(x=>x.id===s.id);if(i>=0)state.stories[i]=s;else state.stories.push(s)});
   ['pos','srs','trans','days','img'].forEach(k=>Object.assign(state[k],b[k]));
   for(const id in b.done)state.done[id]=Object.assign(state.done[id]||{},b.done[id]);
@@ -548,7 +551,11 @@ function normStory(raw){
   }).filter(b=>b.sentences.length);
   if(!blocks.length)return null;
   const title=String(raw.story_title||'Historia sin título').trim();
-  const id=raw.id||slug(title);
+  const baseId=slug(title);
+  const sameBase=state.stories.find(x=>x.id===baseId&&x.title===title);
+  const fingerprint=JSON.stringify(raw.blocks||[]);
+  let hash=2166136261;for(let i=0;i<fingerprint.length;i++){hash^=fingerprint.charCodeAt(i);hash=Math.imul(hash,16777619)}
+  const id=raw.id||(sameBase?baseId:baseId+'-'+(hash>>>0).toString(36));
   if(raw.done_sentences&&typeof raw.done_sentences==='object'){
     state.done[id]=Object.assign(state.done[id]||{},raw.done_sentences);
   }
