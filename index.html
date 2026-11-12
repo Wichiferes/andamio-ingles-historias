@@ -535,7 +535,17 @@ function mergeState(b){
   const previous=Array.isArray(state.stories)?state.stories.slice():[];
   state.stories=[];
   previous.forEach(s=>state.stories.push(s));
-  b.stories.forEach(s=>{const i=state.stories.findIndex(x=>x.id===s.id);if(i>=0)state.stories[i]=s;else state.stories.push(s)});
+  b.stories.forEach(s=>{
+    let id=String(s.id||slug(s.title));
+    const signature=storySignature(s);
+    let i=state.stories.findIndex(x=>x.id===id);
+    if(i>=0&&storySignature(state.stories[i])!==signature){
+      let n=2, candidate=id+'-'+n;
+      while(state.stories.some(x=>x.id===candidate))candidate=id+'-'+(++n);
+      s=Object.assign({},s,{id:candidate});i=-1;
+    }
+    if(i>=0)state.stories[i]=s;else state.stories.push(s)
+  });
   ['pos','srs','trans','days','img'].forEach(k=>Object.assign(state[k],b[k]));
   for(const id in b.done)state.done[id]=Object.assign(state.done[id]||{},b.done[id]);
   const keepPex=state.settings.pexels;
@@ -579,7 +589,13 @@ function normStory(raw){
   const sameBase=state.stories.find(x=>x.id===baseId&&x.title===title);
   const fingerprint=JSON.stringify(raw.blocks||[]);
   let hash=2166136261;for(let i=0;i<fingerprint.length;i++){hash^=fingerprint.charCodeAt(i);hash=Math.imul(hash,16777619)}
-  const id=raw.id||(sameBase?baseId:baseId+'-'+(hash>>>0).toString(36));
+  let id=raw.id||(sameBase?baseId:baseId+'-'+(hash>>>0).toString(36));
+  const incomingSignature=JSON.stringify({title,blocks});
+  const collision=state.stories.find(x=>x.id===id);
+  if(collision&&storySignature(collision)!==incomingSignature){
+    const root=id;let n=2;id=root+'-'+n;
+    while(state.stories.some(x=>x.id===id))id=root+'-'+(++n);
+  }
   if(raw.done_sentences&&typeof raw.done_sentences==='object'){
     state.done[id]=Object.assign(state.done[id]||{},raw.done_sentences);
   }
@@ -593,6 +609,7 @@ function normStory(raw){
   });
   return {id,title,blocks,addedAt:Date.now()};
 }
+function storySignature(s){return JSON.stringify({title:String(s&&s.title||''),blocks:(s&&s.blocks)||[]})}
 const S=id=>state.stories.find(s=>s.id===id);
 const totalSent=s=>s.blocks.reduce((n,b)=>n+b.sentences.length,0);
 const doneCount=s=>Object.keys(state.done[s.id]||{}).length;
