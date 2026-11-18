@@ -145,6 +145,7 @@ select.ta{min-height:0;height:2.85rem;padding-block:.35rem}
 .defcard b{font-family:var(--serif);font-size:1.15rem}
 .defcard span{color:var(--muted);font-size:.94rem;line-height:1.45}
 .vrow{display:flex;gap:.45rem;align-items:stretch}
+.vsay.busy,.btn.busy{opacity:.6}
 .vsay{width:3rem;border-radius:.9rem;border:1.5px solid var(--line);background:var(--card);display:grid;place-items:center}
 .vtap{flex:1;text-align:left;background:var(--card);border:1.5px solid var(--line);border-radius:.9rem;padding:.6rem .85rem}
 .vtap b{font-family:var(--serif);font-size:1.12rem}
@@ -288,6 +289,7 @@ const ICONS={
  key:'<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>',
  sun:'<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>',
  moon:'<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+ redo:'<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
  spark:'<path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z"/>'
 };
 const ic=n=>'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+ICONS[n]+'</svg>';
@@ -685,11 +687,13 @@ function validGeminiKeys(){
   return list;
 }
 
-async function fetchGeminiAudioBlob(text){
+async function fetchGeminiAudioBlob(text,force){
   const cleanText=String(text||'').replace(/\s+/g,' ').trim();
   const voice=state.settings.geminiVoice||'Kore';
-  const cached=await idbGetAudio(cleanText,voice);
-  if(cached)return {blob:cached,cached:true};
+  if(!force){
+    const cached=await idbGetAudio(cleanText,voice);
+    if(cached)return {blob:cached,cached:true};
+  }
 
   const attempts=validGeminiKeys();
   if(!attempts.length)throw new Error('NO_KEYS');
@@ -770,6 +774,23 @@ async function speak(text,rate,btnEl){
   if(state.settings.useGeminiTTS&&validGeminiKeys().length){try{await playAudioBlob(await fetchGeminiAudioBlob(text),rate,btnEl,mySeq);return}catch(e){}}
   try{await playAudioBlob(await fetchFallbackAudioBlob(text),rate,btnEl,mySeq);toast('Usando Edge-TTS de respaldo');return}catch(e){}
   if(btnEl)btnEl.classList.remove('busy');if(mySeq===speakSeq){toast('Usando voz del navegador');speakBrowser(text,rate)}
+}
+
+/* Rehacer: regenera con IA el audio de un texto (ignora y sobrescribe la caché) y lo reproduce */
+async function redoAudio(text,rate,btnEl){
+  if(!text||!String(text).trim())return;
+  if(!validGeminiKeys().length){toast('Para rehacer el audio necesitas una llave de Gemini');openKeysModal();return}
+  stopAudio();const mySeq=speakSeq;if(btnEl)btnEl.classList.add('busy');
+  toast('Rehaciendo audio con IA…');
+  try{
+    const res=await fetchGeminiAudioBlob(text,true);
+    if(mySeq!==speakSeq)return;
+    toast('Audio rehecho y guardado');
+    await playAudioBlob(res,rate,btnEl,mySeq);
+  }catch(e){
+    if(btnEl)btnEl.classList.remove('busy');
+    toast('No se pudo rehacer: '+(e.message||e)+'. Se conserva el audio anterior.');
+  }
 }
 
 /* Generador por lotes: genera todos los audios de una historia (frases, definiciones, ideas, historias, resúmenes y vocabulario) */
@@ -1120,7 +1141,8 @@ function markTerms(text,defs){
 }
 
 /* ---------- plantillas de slides ---------- */
-const say=(t,l,slow)=>'<button class="btn sm" data-a="say" data-t="'+esc(t)+'"'+(slow?' data-slow="1"':'')+'>'+ic('vol')+(l||'Escuchar')+'</button>';
+const redoBtn=(t,cls)=>'<button class="'+(cls||'btn sm ghost')+'" data-a="redo" data-t="'+esc(t)+'" title="Rehacer el audio con IA" aria-label="Rehacer audio">'+ic('redo')+(cls?'':'Rehacer')+'</button>';
+const say=(t,l,slow)=>'<button class="btn sm" data-a="say" data-t="'+esc(t)+'"'+(slow?' data-slow="1"':'')+'>'+ic('vol')+(l||'Escuchar')+'</button>'+(slow?'':redoBtn(t));
 
 R.lib=sl=>{
   const s=S(sl.id);const tot=totalSent(s),d=doneCount(s),pct=tot?Math.round(d/tot*100):0;
@@ -1203,6 +1225,7 @@ H.sent=sl=>{
   if(sl.f===0&&state.settings.autoSpeak){const s=S(ui.sid);setTimeout(()=>speak(s.blocks[sl.bi].sentences[sl.si].text),200)}
 };
 A.say=el=>speak(el.dataset.t,el.dataset.slow?0.68:undefined,el);
+A.redo=el=>redoAudio(el.dataset.t,undefined,el);
 A.term=el=>{
   const sl=ui.deck[ui.i];const x=S(ui.sid).blocks[sl.bi].sentences[sl.si];const d=x.defs[+el.dataset.d];if(!d)return;
   document.querySelectorAll('.term.on').forEach(t=>t.classList.remove('on'));el.classList.add('on');
@@ -1217,7 +1240,7 @@ R.words=sl=>{
   return '<h2>Palabras del bloque</h2><p class="muted">Toca el altavoz para escuchar con Gemini IA o toca la palabra para ver su traducción.</p>'+
     (v.length?'<div class="row">'+say(allWords,'Escuchar todas las palabras')+'</div>':'')+
     '<ul class="defs">'+
-    (v.map(w=>'<li><div class="vrow"><button class="vsay" data-a="say" data-t="'+esc(w.en)+'" aria-label="Escuchar">'+ic('vol')+'</button><button class="vtap" data-a="vflip"><b>'+esc(w.en)+'</b><span class="es">'+esc(w.es)+'</span></button></div></li>').join('')||'<li class="muted">Este bloque no trae vocabulario.</li>')+'</ul>';
+    (v.map(w=>'<li><div class="vrow"><button class="vsay" data-a="say" data-t="'+esc(w.en)+'" aria-label="Escuchar">'+ic('vol')+'</button>'+redoBtn(w.en,'vsay')+'<button class="vtap" data-a="vflip"><b>'+esc(w.en)+'</b><span class="es">'+esc(w.es)+'</span></button></div></li>').join('')||'<li class="muted">Este bloque no trae vocabulario.</li>')+'</ul>';
 };
 A.vflip=el=>el.classList.toggle('on');
 
@@ -1339,7 +1362,7 @@ R.q=sl=>{
   const fb=()=>sl.done?'<p class="'+(sl.ok?'msg good':'msg bad')+'">'+(sl.ok?'¡Bien!':'Era: '+esc(c.en)+' = '+esc(c.es))+'</p>':'';
   let h='<p class="muted sm">Pregunta '+idx+' de '+qs.length+'</p>';
   if(sl.k==='choose')h+='<h2>¿Qué significa?</h2><p class="big">'+esc(c.en)+'</p><div class="row">'+say(c.en)+'</div>'+opts()+fb();
-  else if(sl.k==='listen')h+='<h2>¿Qué palabra escuchaste?</h2><div class="row"><button class="btn pri" data-a="say" data-t="'+esc(c.en)+'">'+ic('vol')+'Escuchar</button><button class="btn" data-a="say" data-t="'+esc(c.en)+'" data-slow="1">Despacio</button></div>'+opts()+fb();
+  else if(sl.k==='listen')h+='<h2>¿Qué palabra escuchaste?</h2><div class="row"><button class="btn pri" data-a="say" data-t="'+esc(c.en)+'">'+ic('vol')+'Escuchar</button><button class="btn" data-a="say" data-t="'+esc(c.en)+'" data-slow="1">Despacio</button>'+redoBtn(c.en)+'</div>'+opts()+fb();
   else h+='<h2>Escríbela en inglés</h2><p class="big">'+esc(c.es)+'</p><div class="row">'+say(c.en,'Escuchar pista')+'</div><p class="muted">Empieza con «'+esc(c.en[0])+'» · '+c.en.length+' caracteres</p>'+
     '<input id="qin" class="ta one" type="text" data-in="qin" autocomplete="off" autocapitalize="none" spellcheck="false" value="'+esc(sl.ans||'')+'"'+(sl.done?' disabled':'')+'>'+
     (sl.done?'':'<div class="row"><button class="btn pri" data-a="qcheck">Comprobar</button></div>')+fb()+(sl.done&&sl.near?'<p class="muted sm">Casi: revisa la ortografía.</p>':'');
@@ -1422,7 +1445,7 @@ async function evaluatePronunciation(items){
 R.prIntro=()=>{
   const count=prItems(ui.scope,'vocab').length+prItems(ui.scope,'phrase').length;return '<h2>Pronunciación</h2><p class="muted">OpenPronounce puede analizar localmente tu WAV, transcribirlo y detectar palabras y fonemas problemáticos. Gemini queda como respaldo y puede redactar feedback.</p>'+scopeSeg()+'<div class="field"><label for="prKind">Qué quieres practicar</label><select id="prKind" class="ta" data-in="prKind"><option value="vocab">Palabras de vocabulario</option><option value="phrase">Frases de los bloques</option></select></div><div class="field"><label for="prCount">Elementos por ronda</label><select id="prCount" class="ta" data-in="prCount"><option value="3">3</option><option value="5" selected>5</option><option value="8">8</option></select></div><div class="callout">Para OpenPronounce ejecuta el servidor local y selecciona ese evaluador en Ajustes. Si no responde, la app intenta Gemini.</div><div class="row"><button class="btn pri" data-a="prStart"'+(count?'':' disabled')+'>Comenzar ronda</button></div>'};
 A.prStart=()=>{const kind=ui.prKind||'vocab';const n=+(ui.prCount||5);const all=prItems(ui.scope,kind);ui.pr={kind,items:shuffle(all).slice(0,n),idx:0,recordings:[],result:null,status:''};setDeck('pron',[{t:'prRound'},{t:'prResult'}],0)};
-R.prRound=()=>{const p=ui.pr;if(!p||!p.items.length)return '<h2>Pronunciación</h2><p>No hay elementos para practicar.</p>';const x=p.items[p.idx];const rec=p.recordings[p.idx];return '<p class="muted sm">Elemento '+(p.idx+1)+' de '+p.items.length+' · '+esc(x.kind)+'</p><div class="pr-card"><h2>Escucha y repite</h2><div class="pr-target">'+esc(x.en)+'</div><div class="row"><button class="btn" data-a="say" data-t="'+esc(x.en)+'">'+ic('vol')+'Escuchar modelo</button></div><button class="pr-mic'+(prRecorder?' recording':'')+'" data-a="prRecord" aria-label="Grabar pronunciación">'+ic('vol')+'</button><p class="muted sm" style="text-align:center">'+(prRecorder?'Grabando… toca para detener':'Toca el micrófono para grabar')+'</p><p class="msg">'+esc(p.status||'')+'</p><div class="row"><button class="btn pri" data-a="prNext"'+(rec?'':' disabled')+'>'+(p.idx===p.items.length-1?'Terminar y evaluar':'Siguiente')+'</button><button class="btn ghost" data-a="prCancel">Cancelar</button></div></div>'};
+R.prRound=()=>{const p=ui.pr;if(!p||!p.items.length)return '<h2>Pronunciación</h2><p>No hay elementos para practicar.</p>';const x=p.items[p.idx];const rec=p.recordings[p.idx];return '<p class="muted sm">Elemento '+(p.idx+1)+' de '+p.items.length+' · '+esc(x.kind)+'</p><div class="pr-card"><h2>Escucha y repite</h2><div class="pr-target">'+esc(x.en)+'</div><div class="row"><button class="btn" data-a="say" data-t="'+esc(x.en)+'">'+ic('vol')+'Escuchar modelo</button>'+redoBtn(x.en)+'</div><button class="pr-mic'+(prRecorder?' recording':'')+'" data-a="prRecord" aria-label="Grabar pronunciación">'+ic('vol')+'</button><p class="muted sm" style="text-align:center">'+(prRecorder?'Grabando… toca para detener':'Toca el micrófono para grabar')+'</p><p class="msg">'+esc(p.status||'')+'</p><div class="row"><button class="btn pri" data-a="prNext"'+(rec?'':' disabled')+'>'+(p.idx===p.items.length-1?'Terminar y evaluar':'Siguiente')+'</button><button class="btn ghost" data-a="prCancel">Cancelar</button></div></div>'};
 A.prRecord=async()=>{if(prRecorder){prRecorder.stop();return}try{if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Este navegador no permite usar el micrófono');prStream=await navigator.mediaDevices.getUserMedia({audio:true});prChunks=[];prRecorder=new MediaRecorder(prStream,{mimeType:prMime()});const idx=ui.pr.idx;prRecorder.ondataavailable=e=>{if(e.data.size)prChunks.push(e.data)};prRecorder.onstop=()=>{const blob=new Blob(prChunks,{type:prRecorder.mimeType||'audio/webm'});ui.pr.recordings[idx]={blob,mime:blob.type};prRecorder=null;prStopStream();ui.pr.status='Grabación lista. Puedes escuchar el modelo o avanzar.';rerender()};prRecorder.start();ui.pr.status='';rerender()}catch(e){ui.pr.status='No se pudo activar el micrófono: '+e.message;rerender()}};
 A.prNext=async()=>{if(prRecorder){prRecorder.stop();return}if(!ui.pr.recordings[ui.pr.idx])return;if(ui.pr.idx<ui.pr.items.length-1){ui.pr.idx++;ui.pr.status='';rerender();return}const btn=document.querySelector('[data-a="prNext"]');if(btn)btn.disabled=true;ui.pr.status='Enviando la ronda al evaluador…';rerender();try{const items=[];for(const x of ui.pr.items){const r=ui.pr.recordings[items.length];const wav=await prNormalizeAudio(r.blob);items.push({...x,audio:wav,b64:await prToB64(wav),mime:'audio/wav'})}ui.pr.result=await evaluatePronunciation(items);ui.pr.result.at=Date.now();state.pronunciation.last=ui.pr.result;state.pronunciation.records.push(ui.pr.result);state.pronunciation.records=state.pronunciation.records.slice(-30);save();ui.i=1;show(1)}catch(e){ui.pr.status=e.message==='NO_KEYS'?'Configura al menos una llave de Gemini en IA.':'Error al evaluar: '+e.message;rerender()}};
 A.prCancel=()=>{if(prRecorder){prRecorder.stop();}else{openPron(ui.scope)}};
